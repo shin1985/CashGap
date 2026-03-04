@@ -9,7 +9,7 @@ import {
   uid,
 } from "./lib/defaults";
 import { formatCurrency, formatPercent, ensureMonthlyArray } from "./lib/format";
-import { getFiscalMonthLabels, getFiscalYearDescription, normalizeStartMonth } from "./lib/fiscal";
+import { getFiscalMonthLabels, getFiscalYearDescription, normalizeStartMonth, rotateMonthly } from "./lib/fiscal";
 import { computeFinancials } from "./lib/calculations";
 import {
   createSpreadsheetInFolder,
@@ -127,11 +127,12 @@ function App() {
   );
 
   const applySnapshot = useCallback((snapshot) => {
+    const safeNum = (v, fallback) => { const n = Number(v); return Number.isFinite(n) ? n : fallback; };
     setParams({
-      startingCash: Number(snapshot.params.startingCash) || DEFAULT_PARAMS.startingCash,
-      taxRate: Number(snapshot.params.taxRate) || DEFAULT_PARAMS.taxRate,
-      receivableDays: Number(snapshot.params.receivableDays) || DEFAULT_PARAMS.receivableDays,
-      payableDays: Number(snapshot.params.payableDays) || DEFAULT_PARAMS.payableDays,
+      startingCash: safeNum(snapshot.params.startingCash, DEFAULT_PARAMS.startingCash),
+      taxRate: safeNum(snapshot.params.taxRate, DEFAULT_PARAMS.taxRate),
+      receivableDays: safeNum(snapshot.params.receivableDays, DEFAULT_PARAMS.receivableDays),
+      payableDays: safeNum(snapshot.params.payableDays, DEFAULT_PARAMS.payableDays),
       fiscalYearStart: normalizeStartMonth(snapshot.params.fiscalYearStart),
     });
     setProjects(snapshot.projects.map((project) => ({ ...project, monthly: ensureMonthlyArray(project.monthly) })));
@@ -219,7 +220,8 @@ function App() {
       });
     });
 
-  const handleOpenWorkbook = () =>
+  const handleOpenWorkbook = () => {
+    if (isDirty && !window.confirm("未保存の変更があります。破棄してワークブックを開きますか？")) return;
     runGoogleTask("ワークブックを読み込み中...", async () => {
       if (!connection.folder) {
         throw new Error("先に保存先フォルダを選択してください。");
@@ -242,6 +244,7 @@ function App() {
         setNotice({ tone: "success", text: `ワークブック「${workbook.name}」を読み込みました。` });
       });
     });
+  };
 
   const handleSaveWorkbook = () =>
     runGoogleTask("保存中...", async () => {
@@ -255,7 +258,8 @@ function App() {
       });
     });
 
-  const handleReloadWorkbook = () =>
+  const handleReloadWorkbook = () => {
+    if (isDirty && !window.confirm("未保存の変更があります。破棄して再読み込みしますか？")) return;
     runGoogleTask("再読込中...", async () => {
       if (!connection.workbook) {
         throw new Error("再読み込みするワークブックが未選択です。");
@@ -267,8 +271,10 @@ function App() {
         setNotice({ tone: "success", text: `「${connection.workbook.name}」を Google Sheets から再読み込みしました。` });
       });
     });
+  };
 
   const handleResetSamples = () => {
+    if (isDirty && !window.confirm("未保存の変更があります。破棄してサンプルデータに戻しますか？")) return;
     const fresh = createDefaultState();
     applySnapshot(fresh);
     setNotice({ tone: "info", text: "サンプルデータに戻しました。保存するまで Google Sheets には反映されません。" });
@@ -374,6 +380,7 @@ function App() {
         const result = parseFreeeFile(reader.result);
         setFreeeImport((prev) => ({ ...prev, [fileType]: { file, result } }));
       } catch (err) {
+        setFreeeImport((prev) => ({ ...prev, [fileType]: null }));
         setNotice({ tone: "warning", text: `freee CSV パースエラー: ${err.message}` });
       }
     };
@@ -385,18 +392,48 @@ function App() {
     const bs = freeeImport.bsFile?.result;
     if (!pl && !bs) return;
 
+    // Extract fiscal year start month from CSV period info (e.g. "2025年04月" → 4)
+    const titleInfo = pl?.titleInfo || bs?.titleInfo;
+    const periodMatch = titleInfo?.periodFrom?.match(/(\d{1,2})月/);
+    if (periodMatch) {
+      const csvStartMonth = normalizeStartMonth(Number(periodMatch[1]));
+      setParams((prev) => {
+        if (prev.fiscalYearStart === csvStartMonth) return prev;
+        // Rotate existing monthly data to match the new fiscal year start
+        const rotate = (arr) => rotateMonthly(arr, prev.fiscalYearStart, csvStartMonth);
+        setProjects((p) => p.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+        setBankExpenseRows((p) => p.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+        setBankManualIncomeRows((p) => p.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+        // Note: plRows rotation is skipped here because plRows will be replaced below if PL CSV is provided
+        if (!(pl?.type === "pl" && pl.plRows?.length > 0)) {
+          setPlRows((p) => p.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+        }
+        return { ...prev, fiscalYearStart: csvStartMonth };
+      });
+    }
+
     if (pl?.type === "pl" && pl.plRows?.length > 0) {
-      setPlRows(pl.plRows);
+      // Preserve autoLink settings from existing rows with matching section+label
+      setPlRows((prev) => {
+        const autoLinkMap = new Map(
+          prev.filter((r) => r.autoLink).map((r) => [`${r.section}:${r.label}`, true]),
+        );
+        return pl.plRows.map((row) => ({
+          ...row,
+          autoLink: autoLinkMap.has(`${row.section}:${row.label}`),
+        }));
+      });
     }
     if (bs?.type === "bs" && bs.bsEstimates) {
+      const bsCash = Number(bs.bsEstimates.startingCash);
       setParams((prev) => ({
         ...prev,
-        startingCash: bs.bsEstimates.startingCash || prev.startingCash,
+        startingCash: Number.isFinite(bsCash) ? bsCash : prev.startingCash,
       }));
     }
     setNotice({
       tone: "success",
-      text: `freee データをインポートしました${pl?.plRows ? ` — PL ${pl.plRows.length} 行` : ""}${bs?.bsEstimates ? ` — 期首キャッシュ ¥${(bs.bsEstimates.startingCash || 0).toLocaleString()}` : ""}`,
+      text: `freee データをインポートしました${pl?.plRows ? ` — PL ${pl.plRows.length} 行` : ""}${bs?.bsEstimates ? ` — 期首キャッシュ ¥${(bs.bsEstimates.startingCash ?? 0).toLocaleString()} / 売掛金 ¥${(bs.bsEstimates.receivableOpening ?? 0).toLocaleString()} / 買掛金 ¥${(bs.bsEstimates.payableOpening ?? 0).toLocaleString()}` : ""}${periodMatch ? ` — 期首月: ${periodMatch[1]}月` : ""}`,
     });
   };
 
@@ -547,7 +584,9 @@ function App() {
               <div className="freee-file-meta">
                 <div><strong>会社名:</strong> {freeeImport.bsFile.result.titleInfo?.company || "—"}</div>
                 <div><strong>期間:</strong> {freeeImport.bsFile.result.titleInfo?.periodFrom} 〜 {freeeImport.bsFile.result.titleInfo?.periodTo}</div>
-                <div><strong>期首キャッシュ:</strong> ¥{(freeeImport.bsFile.result.bsEstimates?.startingCash || 0).toLocaleString()}</div>
+                <div><strong>期首キャッシュ:</strong> ¥{(freeeImport.bsFile.result.bsEstimates?.startingCash ?? 0).toLocaleString()}</div>
+                <div><strong>売掛金（期首）:</strong> ¥{(freeeImport.bsFile.result.bsEstimates?.receivableOpening ?? 0).toLocaleString()}</div>
+                <div><strong>買掛金（期首）:</strong> ¥{(freeeImport.bsFile.result.bsEstimates?.payableOpening ?? 0).toLocaleString()}</div>
                 {freeeImport.bsFile.result.warnings?.map((w, i) => (
                   <div key={i} className="freee-warning">{w}</div>
                 ))}
@@ -1284,12 +1323,21 @@ function App() {
                   className="text-field"
                   type="number"
                   value={params[field.key]}
-                  onChange={(event) =>
-                    setParams((current) => ({
-                      ...current,
-                      [field.key]: field.key === "fiscalYearStart" ? normalizeStartMonth(event.target.value) : Number(event.target.value),
-                    }))
-                  }
+                  onChange={(event) => {
+                    if (field.key === "fiscalYearStart") {
+                      const newStart = normalizeStartMonth(event.target.value);
+                      const oldStart = params.fiscalYearStart;
+                      if (oldStart === newStart) return;
+                      const rotate = (arr) => rotateMonthly(arr, oldStart, newStart);
+                      setParams((current) => ({ ...current, fiscalYearStart: newStart }));
+                      setProjects((prev) => prev.map((p) => ({ ...p, monthly: rotate(ensureMonthlyArray(p.monthly)) })));
+                      setBankExpenseRows((prev) => prev.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+                      setBankManualIncomeRows((prev) => prev.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+                      setPlRows((prev) => prev.map((r) => ({ ...r, monthly: rotate(ensureMonthlyArray(r.monthly)) })));
+                    } else {
+                      setParams((current) => ({ ...current, [field.key]: Number(event.target.value) }));
+                    }
+                  }}
                   style={{ width: 180 }}
                 />
                 <span className="muted small">{field.unit}</span>

@@ -21,22 +21,23 @@ export function decodeCSVBuffer(arrayBuffer) {
 
 export function parseCSVString(text) {
   const rows = [];
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const src = text.replace(/\r\n?/g, "\n");
+  const len = src.length;
+  let pos = 0;
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (line.trim() === "") continue;
+  while (pos < len) {
+    // skip blank lines
+    if (src[pos] === "\n") { pos++; continue; }
 
     const cells = [];
-    let pos = 0;
-    while (pos <= line.length) {
-      if (line[pos] === '"') {
-        // Quoted field
+    while (pos < len && src[pos] !== "\n") {
+      if (src[pos] === '"') {
+        // Quoted field – may span multiple lines
         let value = "";
         pos++; // skip opening quote
-        while (pos < line.length) {
-          if (line[pos] === '"') {
-            if (line[pos + 1] === '"') {
+        while (pos < len) {
+          if (src[pos] === '"') {
+            if (pos + 1 < len && src[pos + 1] === '"') {
               value += '"';
               pos += 2;
             } else {
@@ -44,25 +45,27 @@ export function parseCSVString(text) {
               break;
             }
           } else {
-            value += line[pos];
+            value += src[pos];
             pos++;
           }
         }
         cells.push(value);
-        if (line[pos] === ",") pos++; // skip comma
+        if (pos < len && src[pos] === ",") pos++; // skip comma
       } else {
         // Unquoted field
-        const nextComma = line.indexOf(",", pos);
-        if (nextComma === -1) {
-          cells.push(line.slice(pos));
-          pos = line.length + 1;
-        } else {
-          cells.push(line.slice(pos, nextComma));
-          pos = nextComma + 1;
-        }
+        let end = pos;
+        while (end < len && src[end] !== "," && src[end] !== "\n") end++;
+        cells.push(src.slice(pos, end));
+        pos = end;
+        if (pos < len && src[pos] === ",") pos++; // skip comma
       }
     }
-    rows.push(cells);
+    if (pos < len && src[pos] === "\n") pos++; // skip newline
+
+    // Only add non-empty rows
+    if (cells.length > 0 && cells.some((c) => c.trim() !== "")) {
+      rows.push(cells);
+    }
   }
   return rows;
 }
@@ -257,10 +260,13 @@ function padMonthly(arr) {
 
 // Bank account keywords for detecting bank rows
 const BANK_KEYWORDS = [
+  "現金", "小口現金", "手許現金",
   "普通預金", "当座預金", "定期預金",
   "みずほ", "三菱", "三井住友", "りそな",
   "ゆうちょ", "PayPay銀行", "楽天銀行",
   "住信SBI", "GMOあおぞら", "セブン銀行",
+  "auじぶん銀行", "ソニー銀行", "イオン銀行",
+  "信用金庫", "信用組合",
   "（法人）", "(法人)",
 ];
 

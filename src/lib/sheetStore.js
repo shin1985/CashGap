@@ -196,13 +196,6 @@ export async function initializeWorkbook(spreadsheetId, accessToken, state) {
 }
 
 export async function saveWorkbook(spreadsheetId, accessToken, state) {
-  const ranges = Object.values(SHEET_NAMES).map((name) => `${name}!A:Z`);
-
-  await googleJson(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchClear`, accessToken, {
-    method: "POST",
-    body: JSON.stringify({ ranges }),
-  });
-
   const data = [
     { range: `${SHEET_NAMES.settings}!A1`, values: buildSettingsValues(state) },
     { range: `${SHEET_NAMES.projects}!A1`, values: buildProjectsValues(state) },
@@ -211,6 +204,7 @@ export async function saveWorkbook(spreadsheetId, accessToken, state) {
     { range: `${SHEET_NAMES.plRows}!A1`, values: buildPlValues(state) },
   ];
 
+  // Step 1: Write new data first. If this fails the old data is still intact.
   await googleJson(
     `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchUpdate?valueInputOption=RAW`,
     accessToken,
@@ -220,6 +214,23 @@ export async function saveWorkbook(spreadsheetId, accessToken, state) {
         data,
         includeValuesInResponse: false,
       }),
+    },
+  );
+
+  // Step 2: Clear any leftover rows beyond the written data.
+  // If this fails, the new data is already saved (only stale trailing rows remain).
+  const clearRanges = data.map((entry) => {
+    const sheetName = entry.range.split("!")[0];
+    const rowCount = entry.values.length;
+    return `${sheetName}!A${rowCount + 1}:Z1000`;
+  });
+
+  await googleJson(
+    `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values:batchClear`,
+    accessToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ ranges: clearRanges }),
     },
   );
 }
@@ -277,6 +288,11 @@ export async function loadWorkbook(spreadsheetId, accessToken) {
     monthly: rowToMonthly(record),
   }));
 
+  // If the workbook was previously saved by CashGap, respect empty arrays
+  // (the user intentionally deleted all rows). Only fall back to defaults
+  // for uninitialised workbooks that have never been saved.
+  const isInitialized = settings.appName === "CashGap";
+
   const loadedState = {
     params: {
       startingCash: toNumber(settings.startingCash, defaultState.params.startingCash),
@@ -285,10 +301,10 @@ export async function loadWorkbook(spreadsheetId, accessToken) {
       payableDays: toNumber(settings.payableDays, defaultState.params.payableDays),
       fiscalYearStart: normalizeStartMonth(settings.fiscalYearStart || defaultState.params.fiscalYearStart),
     },
-    projects: projects.length ? projects : defaultState.projects,
-    bankManualIncomeRows: bankManualIncomeRows.length ? bankManualIncomeRows : defaultState.bankManualIncomeRows,
-    bankExpenseRows: bankExpenseRows.length ? bankExpenseRows : defaultState.bankExpenseRows,
-    plRows: plRows.length ? plRows : defaultState.plRows,
+    projects: projects.length || isInitialized ? projects : defaultState.projects,
+    bankManualIncomeRows: bankManualIncomeRows.length || isInitialized ? bankManualIncomeRows : defaultState.bankManualIncomeRows,
+    bankExpenseRows: bankExpenseRows.length || isInitialized ? bankExpenseRows : defaultState.bankExpenseRows,
+    plRows: plRows.length || isInitialized ? plRows : defaultState.plRows,
   };
 
   return loadedState;
