@@ -18,7 +18,10 @@ export const DEFAULT_PARAMS = {
   receivableDays: 30,
   payableDays: 45,
   startingCash: 10000000,
+  receivableOpening: 0,
+  payableOpening: 0,
   fiscalYearStart: 4,
+  marginMonths: 4,
 };
 
 export function createDefaultProjects() {

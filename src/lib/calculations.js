@@ -1,12 +1,14 @@
 import { MONTH_COUNT } from "./defaults";
 import { ensureMonthlyArray } from "./format";
 
-function sumRows(rows, resolver) {
-  const totals = new Array(MONTH_COUNT).fill(0);
+function sumRows(rows, resolver, length = MONTH_COUNT) {
+  const totals = new Array(length).fill(0);
   rows.forEach((row) => {
     const monthly = resolver(row);
     monthly.forEach((value, index) => {
-      totals[index] += Number(value) || 0;
+      if (index < length) {
+        totals[index] += Number(value) || 0;
+      }
     });
   });
   return totals;
@@ -20,6 +22,9 @@ function resolvePlMonthly(row, projectRevenue) {
 }
 
 export function computeFinancials({ params, projects, bankExpenseRows, bankManualIncomeRows, plRows }) {
+  const marginMonths = Math.max(0, Math.min(6, Number(params.marginMonths) || 0));
+  const extendedCount = MONTH_COUNT + marginMonths;
+
   const projectRevenue = new Array(MONTH_COUNT).fill(0);
   projects.forEach((project) => {
     ensureMonthlyArray(project.monthly, MONTH_COUNT).forEach((value, index) => {
@@ -27,11 +32,12 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
     });
   });
 
+  // Extended arrays: auto income uses extendedCount so spillover is visible
   const perProjectCash = projects.map((project) => {
-    const shiftedMonthly = new Array(MONTH_COUNT).fill(0);
+    const shiftedMonthly = new Array(extendedCount).fill(0);
     ensureMonthlyArray(project.monthly, MONTH_COUNT).forEach((value, index) => {
       const target = index + Number(project.paymentSite || 0);
-      if (target < MONTH_COUNT) {
+      if (target < extendedCount) {
         shiftedMonthly[target] += value;
       }
     });
@@ -42,30 +48,41 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
     };
   });
 
-  const autoIncome = new Array(MONTH_COUNT).fill(0);
+  const autoIncome = new Array(extendedCount).fill(0);
   perProjectCash.forEach((project) => {
     project.shiftedMonthly.forEach((value, index) => {
       autoIncome[index] += value;
     });
   });
 
+  // Spillover = revenue that falls beyond even the extended range
   let spillover = 0;
   projects.forEach((project) => {
     ensureMonthlyArray(project.monthly, MONTH_COUNT).forEach((value, index) => {
-      if (index + Number(project.paymentSite || 0) >= MONTH_COUNT) {
+      if (index + Number(project.paymentSite || 0) >= extendedCount) {
         spillover += value;
       }
     });
   });
 
-  const manualIncome = sumRows(bankManualIncomeRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
+  // Manual income: 12 months of data, padded with 0 for margin months
+  const manualIncome = new Array(extendedCount).fill(0);
+  const manualIncome12 = sumRows(bankManualIncomeRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
+  manualIncome12.forEach((value, index) => {
+    manualIncome[index] = value;
+  });
 
   // Split expenses into planned vs actual
   const plannedExpenseRows = bankExpenseRows.filter((row) => row.type === "planned");
   const actualExpenseRows = bankExpenseRows.filter((row) => row.type === "actual");
 
-  const plannedExpense = sumRows(plannedExpenseRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
-  const actualExpense = sumRows(actualExpenseRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
+  // Expenses: 12 months of data, padded with 0 for margin months
+  const plannedExpense12 = sumRows(plannedExpenseRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
+  const actualExpense12 = sumRows(actualExpenseRows, (row) => ensureMonthlyArray(row.monthly, MONTH_COUNT));
+  const plannedExpense = new Array(extendedCount).fill(0);
+  const actualExpense = new Array(extendedCount).fill(0);
+  plannedExpense12.forEach((value, index) => { plannedExpense[index] = value; });
+  actualExpense12.forEach((value, index) => { actualExpense[index] = value; });
 
   // Auto-detect the last month with actual data as the closed month
   let actualClosedMonth = -1;
@@ -76,10 +93,13 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
     }
   }
 
-  // Resolved expense: actual up to closed month, planned after
-  const resolvedExpense = new Array(MONTH_COUNT).fill(0).map((_, index) =>
-    index <= actualClosedMonth ? actualExpense[index] : plannedExpense[index],
-  );
+  // Resolved expense: sum of actual + planned per month (within 12 months); 0 in margin.
+  // Users zero-out planned rows as actuals come in, so summing is correct.
+  // This avoids the bug where partial actual data in a month discards all planned amounts.
+  const resolvedExpense = new Array(extendedCount).fill(0).map((_, index) => {
+    if (index >= MONTH_COUNT) return 0;
+    return actualExpense[index] + plannedExpense[index];
+  });
 
   const income = autoIncome.map((value, index) => value + manualIncome[index]);
   const net = income.map((value, index) => value - resolvedExpense[index]);
@@ -135,17 +155,20 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
 
   const cash = balance.at(-1) ?? Number(params.startingCash) ?? 0;
   const totalRevenue = revenue.reduce((sum, value) => sum + value, 0);
-  const receivables = (totalRevenue / MONTH_COUNT) * ((Number(params.receivableDays) || 0) / 30);
+  const receivables = Number(params.receivableOpening) ||
+    (totalRevenue / MONTH_COUNT) * ((Number(params.receivableDays) || 0) / 30);
   const totalCost = cogs.reduce((sum, value) => sum + value, 0) + sga.reduce((sum, value) => sum + value, 0);
-  const payables = (totalCost / MONTH_COUNT) * ((Number(params.payableDays) || 0) / 30);
+  const payables = Number(params.payableOpening) ||
+    (totalCost / MONTH_COUNT) * ((Number(params.payableDays) || 0) / 30);
   const totalAssets = cash + receivables;
   const equity = totalAssets - payables;
 
-  const gapAnalysis = projectRevenue.map((value, index) => ({
+  // Gap analysis: extended to show spillover months
+  const gapAnalysis = Array.from({ length: extendedCount }, (_, index) => ({
     month: index,
-    plRevenue: value,
+    plRevenue: index < MONTH_COUNT ? projectRevenue[index] : 0,
     cfIncome: autoIncome[index],
-    gap: value - autoIncome[index],
+    gap: (index < MONTH_COUNT ? projectRevenue[index] : 0) - autoIncome[index],
   }));
 
   // Expense variance analysis: PL費用 vs 支払予定 vs 実績出金
@@ -211,6 +234,8 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
 
   return {
     projectRevenue,
+    marginMonths,
+    extendedCount,
     cfAutoIncome: {
       perProject: perProjectCash,
       totals: autoIncome,
