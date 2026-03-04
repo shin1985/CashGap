@@ -136,7 +136,12 @@ function App() {
       fiscalYearStart: normalizeStartMonth(snapshot.params.fiscalYearStart),
     });
     setProjects(snapshot.projects.map((project) => ({ ...project, monthly: ensureMonthlyArray(project.monthly) })));
-    setBankExpenseRows(snapshot.bankExpenseRows.map((row) => ({ ...row, monthly: ensureMonthlyArray(row.monthly) })));
+    setBankExpenseRows(snapshot.bankExpenseRows.map((row) => ({
+      ...row,
+      type: row.type === "forecast" ? "planned" : row.type === "actual" ? "actual" : "planned",
+      linkedPlRowId: row.linkedPlRowId || "",
+      monthly: ensureMonthlyArray(row.monthly),
+    })));
     setBankManualIncomeRows(
       snapshot.bankManualIncomeRows.map((row) => ({ ...row, monthly: ensureMonthlyArray(row.monthly) })),
     );
@@ -333,7 +338,7 @@ function App() {
   const removeProject = (id) => setProjects((current) => current.filter((project) => project.id !== id));
 
   const addBankRow = (category, type) => {
-    const row = { id: uid(), label: "新規項目", category, type, monthly: new Array(12).fill(0) };
+    const row = { id: uid(), label: "新規項目", category, type, linkedPlRowId: "", monthly: new Array(12).fill(0) };
     if (category === "income") {
       setBankManualIncomeRows((current) => [...current, row]);
     } else {
@@ -358,7 +363,14 @@ function App() {
     ]);
   };
 
-  const removePlRow = (id) => setPlRows((current) => current.filter((row) => row.id !== id));
+  const removePlRow = (id) => {
+    setPlRows((current) => current.filter((row) => row.id !== id));
+    setBankExpenseRows((current) =>
+      current.map((row) =>
+        row.linkedPlRowId === id ? { ...row, linkedPlRowId: "" } : row,
+      ),
+    );
+  };
 
   const bankComputed = derived.bankComputed;
   const plComputed = derived.plComputed;
@@ -367,6 +379,7 @@ function App() {
   const projectRevenue = derived.projectRevenue;
   const gapAnalysis = derived.gapAnalysis;
   const spillover = derived.spillover;
+  const expenseVariance = derived.expenseVariance;
 
   const statusToneClass = notice.tone === "warning" ? "warning" : notice.tone === "success" ? "success" : "info";
 
@@ -413,13 +426,27 @@ function App() {
     }
 
     if (pl?.type === "pl" && pl.plRows?.length > 0) {
-      // Preserve autoLink settings from existing rows with matching section+label
+      // Preserve autoLink settings and IDs from existing rows with matching section+label+occurrence
       setPlRows((prev) => {
         const autoLinkMap = new Map(
           prev.filter((r) => r.autoLink).map((r) => [`${r.section}:${r.label}`, true]),
         );
-        return pl.plRows.map((row) => ({
+        // Preserve PL row IDs so that linkedPlRowId references in bankExpenseRows survive
+        const makeKeyList = (rows) => {
+          const counts = new Map();
+          return rows.map((row) => {
+            const base = `${row.section}:${row.subtype}:${row.label}`;
+            const index = (counts.get(base) || 0) + 1;
+            counts.set(base, index);
+            return { key: `${base}:${index}`, row };
+          });
+        };
+        const currentMap = new Map(
+          makeKeyList(prev).map(({ key, row }) => [key, row.id]),
+        );
+        return makeKeyList(pl.plRows).map(({ key, row }) => ({
           ...row,
+          id: currentMap.get(key) || row.id,
           autoLink: autoLinkMap.has(`${row.section}:${row.label}`),
         }));
       });
@@ -643,7 +670,7 @@ function App() {
           <MetricCard label="期首残高" value={formatCurrency(params.startingCash)} color="#cbd5e1" />
           <MetricCard label="期末残高" value={formatCurrency(bankComputed.balance.at(-1) ?? params.startingCash)} color={(bankComputed.balance.at(-1) ?? 0) >= 0 ? "#34d399" : "#f87171"} />
           <MetricCard label="年間入金合計" value={formatCurrency(bankComputed.income.reduce((sum, value) => sum + value, 0))} color="#67e8f9" sub={`自動連動 ${formatCurrency(cfAutoIncome.totals.reduce((sum, value) => sum + value, 0))}`} />
-          <MetricCard label="年間出金合計" value={formatCurrency(bankComputed.expense.reduce((sum, value) => sum + value, 0))} color="#f87171" />
+          <MetricCard label="年間出金(残高反映)" value={formatCurrency(bankComputed.resolvedExpense.reduce((sum, value) => sum + value, 0))} color="#f87171" sub={`予定 ${formatCurrency(bankComputed.plannedExpense.reduce((sum, value) => sum + value, 0))} / 実績 ${formatCurrency(bankComputed.actualExpense.reduce((sum, value) => sum + value, 0))}`} />
         </div>
 
         <div className="card">
@@ -765,11 +792,11 @@ function App() {
           <div className="card-title">
             <div>
               <h3>出金明細</h3>
-              <div className="card-subtitle">実績と予測を同じ表で管理できます。</div>
+              <div className="card-subtitle">支払予定と実績出金を管理し、PL費用項目と紐付けて差異を分析します。</div>
             </div>
             <div className="action-row">
               <button type="button" className="secondary-button" onClick={() => addBankRow("expense", "actual")}>＋ 実績</button>
-              <button type="button" className="secondary-button" onClick={() => addBankRow("expense", "forecast")}>＋ 予測</button>
+              <button type="button" className="secondary-button" onClick={() => addBankRow("expense", "planned")}>＋ 支払予定</button>
             </div>
           </div>
           <div className="table-wrap">
@@ -778,6 +805,7 @@ function App() {
                 <tr>
                   <th>項目</th>
                   <th>区分</th>
+                  <th>PL紐付け</th>
                   {months.map((month) => (
                     <th key={month}>{month}</th>
                   ))}
@@ -786,37 +814,83 @@ function App() {
                 </tr>
               </thead>
               <tbody>
-                {bankExpenseRows.map((row) => (
-                  <tr key={row.id} style={{ background: row.type === "forecast" ? "rgba(15, 23, 42, 0.35)" : "transparent" }}>
-                    <td>
-                      <EditableCell
-                        type="text"
-                        value={row.label}
-                        onChange={(value) =>
-                          setBankExpenseRows((current) => current.map((item) => (item.id === row.id ? { ...item, label: value } : item)))
-                        }
-                        align="left"
-                      />
-                    </td>
-                    <td><Badge color={row.type === "forecast" ? "#fbbf24" : "#60a5fa"}>{row.type === "forecast" ? "予測" : "実績"}</Badge></td>
-                    {row.monthly.map((value, index) => (
-                      <td key={`${row.id}-${index}`}>
-                        <EditableCell value={value} onChange={(next) => updateBankExpenseCell(row.id, index, next)} />
+                {bankExpenseRows.map((row) => {
+                  const expensePlRows = plRows.filter((plRow) => {
+                    if (plRow.section === "revenue") return false;
+                    if (plRow.section === "other" && plRow.subtype === "income") return false;
+                    return true;
+                  });
+                  return (
+                    <tr key={row.id} style={{ background: row.type === "planned" ? "rgba(15, 23, 42, 0.35)" : "transparent" }}>
+                      <td>
+                        <EditableCell
+                          type="text"
+                          value={row.label}
+                          onChange={(value) =>
+                            setBankExpenseRows((current) => current.map((item) => (item.id === row.id ? { ...item, label: value } : item)))
+                          }
+                          align="left"
+                        />
                       </td>
-                    ))}
-                    <td style={{ fontWeight: 700 }}>{formatCurrency(row.monthly.reduce((sum, value) => sum + value, 0))}</td>
-                    <td>
-                      <button type="button" className="danger-button" onClick={() => removeExpenseRow(row.id)}>削除</button>
-                    </td>
-                  </tr>
-                ))}
+                      <td><Badge color={row.type === "planned" ? "#fbbf24" : "#60a5fa"}>{row.type === "planned" ? "支払予定" : "実績"}</Badge></td>
+                      <td>
+                        <select
+                          value={row.linkedPlRowId || ""}
+                          onChange={(e) =>
+                            setBankExpenseRows((current) =>
+                              current.map((item) =>
+                                item.id === row.id ? { ...item, linkedPlRowId: e.target.value } : item,
+                              ),
+                            )
+                          }
+                          style={{ fontSize: "0.75rem", background: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 4, padding: "2px 4px", maxWidth: 120 }}
+                        >
+                          <option value="">未紐付け</option>
+                          {expensePlRows.map((plRow) => (
+                            <option key={plRow.id} value={plRow.id}>{plRow.label}</option>
+                          ))}
+                        </select>
+                      </td>
+                      {row.monthly.map((value, index) => (
+                        <td key={`${row.id}-${index}`}>
+                          <EditableCell value={value} onChange={(next) => updateBankExpenseCell(row.id, index, next)} />
+                        </td>
+                      ))}
+                      <td style={{ fontWeight: 700 }}>{formatCurrency(row.monthly.reduce((sum, value) => sum + value, 0))}</td>
+                      <td>
+                        <button type="button" className="danger-button" onClick={() => removeExpenseRow(row.id)}>削除</button>
+                      </td>
+                    </tr>
+                  );
+                })}
                 <tr className="sum-row">
-                  <td>出金合計</td>
+                  <td>支払予定合計</td>
                   <td />
-                  {bankComputed.expense.map((value, index) => (
-                    <td key={`expense-total-${index}`} style={{ color: "#f87171" }}>{formatCurrency(value)}</td>
+                  <td />
+                  {bankComputed.plannedExpense.map((value, index) => (
+                    <td key={`planned-total-${index}`} style={{ color: "#fbbf24" }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#f87171" }}>{formatCurrency(bankComputed.expense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#fbbf24" }}>{formatCurrency(bankComputed.plannedExpense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td />
+                </tr>
+                <tr className="sum-row">
+                  <td>実績出金合計</td>
+                  <td />
+                  <td />
+                  {bankComputed.actualExpense.map((value, index) => (
+                    <td key={`actual-total-${index}`} style={{ color: "#60a5fa" }}>{formatCurrency(value)}</td>
+                  ))}
+                  <td style={{ color: "#60a5fa" }}>{formatCurrency(bankComputed.actualExpense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td />
+                </tr>
+                <tr className="sum-row">
+                  <td>残高反映出金</td>
+                  <td />
+                  <td />
+                  {bankComputed.resolvedExpense.map((value, index) => (
+                    <td key={`resolved-total-${index}`} style={{ color: "#f87171" }}>{formatCurrency(value)}</td>
+                  ))}
+                  <td style={{ color: "#f87171" }}>{formatCurrency(bankComputed.resolvedExpense.reduce((sum, value) => sum + value, 0))}</td>
                   <td />
                 </tr>
               </tbody>
@@ -858,6 +932,112 @@ function App() {
             </table>
           </div>
         </div>
+
+        {expenseVariance.rows.length > 0 && (
+          <div className="card">
+            <div className="card-title">
+              <div>
+                <h3>出金差異分析</h3>
+                <div className="card-subtitle">PL費用 → 支払予定 → 実績出金の3層で差異を分析します。</div>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>費用項目</th>
+                    <th>PL年計</th>
+                    <th>支払予定年計</th>
+                    <th>実績出金年計</th>
+                    <th>PL→予定差</th>
+                    <th>予定→実績差</th>
+                    <th>最大差異月</th>
+                    <th>判定</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {expenseVariance.rows.map((row) => {
+                    let judgment = "—";
+                    let judgmentColor = "#94a3b8";
+                    if (row.totals.actual > 0 && row.totals.planned === 0 && row.totals.pl === 0) {
+                      judgment = "未計上出金";
+                      judgmentColor = "#f87171";
+                    } else if (row.totals.actualGap > 0) {
+                      judgment = "予定超過";
+                      judgmentColor = "#f87171";
+                    } else if (row.totals.actualGap < 0) {
+                      judgment = "未実行/後ろ倒し";
+                      judgmentColor = "#fbbf24";
+                    } else if (row.totals.planGap > 0) {
+                      judgment = "前払い予定";
+                      judgmentColor = "#fb923c";
+                    } else if (row.totals.planGap < 0) {
+                      judgment = "未払予定";
+                      judgmentColor = "#fbbf24";
+                    } else if (row.totals.pl === 0 && row.totals.planned === 0 && row.totals.actual === 0) {
+                      judgment = "—";
+                    } else {
+                      judgment = "一致";
+                      judgmentColor = "#34d399";
+                    }
+                    return (
+                      <tr key={row.plRowId}>
+                        <td>{row.label}</td>
+                        <td>{formatCurrency(row.totals.pl)}</td>
+                        <td style={{ color: "#fbbf24" }}>{formatCurrency(row.totals.planned)}</td>
+                        <td style={{ color: "#60a5fa" }}>{formatCurrency(row.totals.actual)}</td>
+                        <td style={{ color: row.totals.planGap > 0 ? "#fb923c" : row.totals.planGap < 0 ? "#fbbf24" : "#94a3b8" }}>
+                          {formatCurrency(row.totals.planGap)}
+                        </td>
+                        <td style={{ color: row.totals.actualGap > 0 ? "#f87171" : row.totals.actualGap < 0 ? "#fbbf24" : "#94a3b8" }}>
+                          {formatCurrency(row.totals.actualGap)}
+                        </td>
+                        <td>{row.maxGapMonth >= 0 ? months[row.maxGapMonth] : "—"}</td>
+                        <td style={{ color: judgmentColor, fontWeight: 700 }}>{judgment}</td>
+                      </tr>
+                    );
+                  })}
+                  {expenseVariance.unlinkedActualRows.length > 0 && (
+                    <tr style={{ background: "rgba(248, 113, 113, 0.1)" }}>
+                      <td style={{ color: "#f87171" }}>未紐付け実績出金 ({expenseVariance.unlinkedActualRows.length}件)</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td style={{ color: "#f87171" }}>
+                        {formatCurrency(
+                          expenseVariance.unlinkedActualRows.reduce(
+                            (sum, row) => sum + row.monthly.reduce((s, v) => s + (Number(v) || 0), 0), 0,
+                          ),
+                        )}
+                      </td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td style={{ color: "#f87171", fontWeight: 700 }}>PL未紐付け</td>
+                    </tr>
+                  )}
+                  {expenseVariance.unlinkedPlannedRows.length > 0 && (
+                    <tr style={{ background: "rgba(251, 191, 36, 0.1)" }}>
+                      <td style={{ color: "#fbbf24" }}>未紐付け支払予定 ({expenseVariance.unlinkedPlannedRows.length}件)</td>
+                      <td>—</td>
+                      <td style={{ color: "#fbbf24" }}>
+                        {formatCurrency(
+                          expenseVariance.unlinkedPlannedRows.reduce(
+                            (sum, row) => sum + row.monthly.reduce((s, v) => s + (Number(v) || 0), 0), 0,
+                          ),
+                        )}
+                      </td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td>—</td>
+                      <td style={{ color: "#fbbf24", fontWeight: 700 }}>PL未紐付け</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </>
     );
   };

@@ -124,12 +124,13 @@ function buildManualIncomeValues(state) {
 
 function buildExpensesValues(state) {
   return [
-    ["id", "label", "category", "type", ...MONTH_HEADERS],
+    ["id", "label", "category", "type", "linkedPlRowId", ...MONTH_HEADERS],
     ...state.bankExpenseRows.map((row) => [
       row.id,
       row.label,
       row.category,
       row.type,
+      row.linkedPlRowId || "",
       ...ensureMonthlyArray(row.monthly),
     ]),
   ];
@@ -240,7 +241,7 @@ export async function loadWorkbook(spreadsheetId, accessToken) {
     `${SHEET_NAMES.settings}!A:B`,
     `${SHEET_NAMES.projects}!A:Q`,
     `${SHEET_NAMES.manualIncome}!A:Q`,
-    `${SHEET_NAMES.expenses}!A:Q`,
+    `${SHEET_NAMES.expenses}!A:R`,
     `${SHEET_NAMES.plRows}!A:R`,
   ];
 
@@ -275,7 +276,8 @@ export async function loadWorkbook(spreadsheetId, accessToken) {
     id: record.id || uid(),
     label: record.label || "新規出金",
     category: record.category || "expense",
-    type: record.type || "actual",
+    type: record.type === "forecast" ? "planned" : record.type === "actual" ? "actual" : "planned",
+    linkedPlRowId: record.linkedPlRowId || "",
     monthly: rowToMonthly(record),
   }));
   const plRows = rowsToObjects(plRowsRange?.values || []).map((record) => ({
