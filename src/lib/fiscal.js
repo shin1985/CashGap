@@ -32,6 +32,19 @@ export function getFiscalYearDescription(startMonth) {
 }
 
 /**
+ * Generate labels for margin months beyond the fiscal year.
+ * E.g. if fiscal year starts April and ends March, margin labels are "翌4月", "翌5月", ...
+ */
+export function getFiscalMarginLabels(startMonth, marginMonths) {
+  const normalized = normalizeStartMonth(startMonth);
+  // The 13th month (index 12) is the same calendar month as the start month
+  const startIndex = normalized - 1;
+  return Array.from({ length: marginMonths }, (_, index) =>
+    `翌${CALENDAR_MONTH_LABELS[(startIndex + index) % 12]}`,
+  );
+}
+
+/**
  * Rotate a 12-element monthly array when the fiscal year start month changes.
  * Each element's calendar-month meaning is preserved.
  *

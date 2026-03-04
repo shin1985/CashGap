@@ -88,10 +88,13 @@ function buildSettingsValues(state) {
     ["schemaVersion", "1"],
     ["savedAt", new Date().toISOString()],
     ["startingCash", Number(params.startingCash) || 0],
+    ["receivableOpening", Number(params.receivableOpening) || 0],
+    ["payableOpening", Number(params.payableOpening) || 0],
     ["taxRate", Number(params.taxRate) || 0],
     ["receivableDays", Number(params.receivableDays) || 0],
     ["payableDays", Number(params.payableDays) || 0],
     ["fiscalYearStart", normalizeStartMonth(params.fiscalYearStart)],
+    ["marginMonths", Number(params.marginMonths) || 0],
   ];
 }
 
@@ -142,7 +145,7 @@ function buildPlValues(state) {
     ...state.plRows.map((row) => [
       row.id,
       row.section,
-      row.subtype || (row.section === "other" ? "expense" : "income"),
+      row.subtype || (row.section === "revenue" ? "income" : "expense"),
       row.label,
       row.autoLink ? "TRUE" : "FALSE",
       ...ensureMonthlyArray(row.monthly),
@@ -298,10 +301,13 @@ export async function loadWorkbook(spreadsheetId, accessToken) {
   const loadedState = {
     params: {
       startingCash: toNumber(settings.startingCash, defaultState.params.startingCash),
+      receivableOpening: toNumber(settings.receivableOpening, 0),
+      payableOpening: toNumber(settings.payableOpening, 0),
       taxRate: toNumber(settings.taxRate, defaultState.params.taxRate),
       receivableDays: toNumber(settings.receivableDays, defaultState.params.receivableDays),
       payableDays: toNumber(settings.payableDays, defaultState.params.payableDays),
       fiscalYearStart: normalizeStartMonth(settings.fiscalYearStart || defaultState.params.fiscalYearStart),
+      marginMonths: Math.max(0, Math.min(6, toNumber(settings.marginMonths, defaultState.params.marginMonths))),
     },
     projects: projects.length || isInitialized ? projects : defaultState.projects,
     bankManualIncomeRows: bankManualIncomeRows.length || isInitialized ? bankManualIncomeRows : defaultState.bankManualIncomeRows,

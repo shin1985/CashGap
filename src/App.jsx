@@ -9,7 +9,7 @@ import {
   uid,
 } from "./lib/defaults";
 import { formatCurrency, formatPercent, ensureMonthlyArray } from "./lib/format";
-import { getFiscalMonthLabels, getFiscalYearDescription, normalizeStartMonth, rotateMonthly } from "./lib/fiscal";
+import { getFiscalMonthLabels, getFiscalMarginLabels, getFiscalYearDescription, normalizeStartMonth, rotateMonthly } from "./lib/fiscal";
 import { computeFinancials } from "./lib/calculations";
 import {
   createSpreadsheetInFolder,
@@ -121,6 +121,8 @@ function App() {
   const isDirty = persistableDigest !== lastSavedDigestRef.current;
 
   const months = useMemo(() => getFiscalMonthLabels(params.fiscalYearStart), [params.fiscalYearStart]);
+  const marginLabels = useMemo(() => getFiscalMarginLabels(params.fiscalYearStart, params.marginMonths || 0), [params.fiscalYearStart, params.marginMonths]);
+  const allMonths = useMemo(() => [...months, ...marginLabels], [months, marginLabels]);
   const derived = useMemo(
     () => computeFinancials({ params, projects, bankExpenseRows, bankManualIncomeRows, plRows }),
     [params, projects, bankExpenseRows, bankManualIncomeRows, plRows],
@@ -134,6 +136,7 @@ function App() {
       receivableDays: safeNum(snapshot.params.receivableDays, DEFAULT_PARAMS.receivableDays),
       payableDays: safeNum(snapshot.params.payableDays, DEFAULT_PARAMS.payableDays),
       fiscalYearStart: normalizeStartMonth(snapshot.params.fiscalYearStart),
+      marginMonths: Math.max(0, Math.min(6, safeNum(snapshot.params.marginMonths, DEFAULT_PARAMS.marginMonths))),
     });
     setProjects(snapshot.projects.map((project) => ({ ...project, monthly: ensureMonthlyArray(project.monthly) })));
     setBankExpenseRows(snapshot.bankExpenseRows.map((row) => ({
@@ -380,6 +383,8 @@ function App() {
   const gapAnalysis = derived.gapAnalysis;
   const spillover = derived.spillover;
   const expenseVariance = derived.expenseVariance;
+  const derivedMarginMonths = derived.marginMonths;
+  const extendedCount = derived.extendedCount;
 
   const statusToneClass = notice.tone === "warning" ? "warning" : notice.tone === "success" ? "success" : "info";
 
@@ -427,35 +432,47 @@ function App() {
 
     if (pl?.type === "pl" && pl.plRows?.length > 0) {
       // Preserve autoLink settings and IDs from existing rows with matching section+label+occurrence
-      setPlRows((prev) => {
-        const autoLinkMap = new Map(
-          prev.filter((r) => r.autoLink).map((r) => [`${r.section}:${r.label}`, true]),
-        );
-        // Preserve PL row IDs so that linkedPlRowId references in bankExpenseRows survive
-        const makeKeyList = (rows) => {
-          const counts = new Map();
-          return rows.map((row) => {
-            const base = `${row.section}:${row.subtype}:${row.label}`;
-            const index = (counts.get(base) || 0) + 1;
-            counts.set(base, index);
-            return { key: `${base}:${index}`, row };
-          });
-        };
-        const currentMap = new Map(
-          makeKeyList(prev).map(({ key, row }) => [key, row.id]),
-        );
-        return makeKeyList(pl.plRows).map(({ key, row }) => ({
-          ...row,
-          id: currentMap.get(key) || row.id,
-          autoLink: autoLinkMap.has(`${row.section}:${row.label}`),
-        }));
-      });
+      const autoLinkMap = new Map(
+        plRows.filter((r) => r.autoLink).map((r) => [`${r.section}:${r.label}`, true]),
+      );
+      const makeKeyList = (rows) => {
+        const counts = new Map();
+        return rows.map((row) => {
+          const base = `${row.section}:${row.subtype}:${row.label}`;
+          const index = (counts.get(base) || 0) + 1;
+          counts.set(base, index);
+          return { key: `${base}:${index}`, row };
+        });
+      };
+      const currentMap = new Map(
+        makeKeyList(plRows).map(({ key, row }) => [key, row.id]),
+      );
+      const newPlRows = makeKeyList(pl.plRows).map(({ key, row }) => ({
+        ...row,
+        id: currentMap.get(key) || row.id,
+        autoLink: autoLinkMap.has(`${row.section}:${row.label}`),
+      }));
+      setPlRows(newPlRows);
+
+      // Clean up orphaned linkedPlRowId references (Fix #2)
+      const validPlIds = new Set(newPlRows.map((r) => r.id));
+      setBankExpenseRows((prev) =>
+        prev.map((row) =>
+          row.linkedPlRowId && !validPlIds.has(row.linkedPlRowId)
+            ? { ...row, linkedPlRowId: "" }
+            : row,
+        ),
+      );
     }
     if (bs?.type === "bs" && bs.bsEstimates) {
       const bsCash = Number(bs.bsEstimates.startingCash);
+      const bsReceivable = Number(bs.bsEstimates.receivableOpening);
+      const bsPayable = Number(bs.bsEstimates.payableOpening);
       setParams((prev) => ({
         ...prev,
         startingCash: Number.isFinite(bsCash) ? bsCash : prev.startingCash,
+        receivableOpening: Number.isFinite(bsReceivable) ? bsReceivable : 0,
+        payableOpening: Number.isFinite(bsPayable) ? bsPayable : 0,
       }));
     }
     setNotice({
@@ -651,7 +668,7 @@ function App() {
             <div>
               <strong>資金ショートの可能性</strong>
               <div className="small">
-                {bankComputed.dangerMonths.map((item) => months[item.month]).join("・")} に残高がマイナスになります。
+                {bankComputed.dangerMonths.map((item) => allMonths[item.month]).join("・")} に残高がマイナスになります。
                 最大マイナスは {formatCurrency(Math.min(...bankComputed.dangerMonths.map((item) => item.balance)))} です。
               </div>
             </div>
@@ -661,7 +678,7 @@ function App() {
             <div>✅</div>
             <div>
               <strong>全月で残高がプラスです</strong>
-              <div className="small">年度の 12 ヶ月を通して資金繰りは安全圏です。</div>
+              <div className="small">表示期間を通して資金繰りは安全圏です。</div>
             </div>
           </div>
         )}
@@ -684,15 +701,16 @@ function App() {
             {bankComputed.balance.map((value, index) => {
               const ratio = maxBalance ? Math.abs(value) / maxBalance : 0;
               const negative = value < 0;
+              const isMargin = index >= 12;
               return (
-                <div key={months[index]} className="chart-col">
+                <div key={allMonths[index]} className="chart-col" style={isMargin ? { opacity: 0.6, borderLeft: index === 12 ? "1px dashed #475569" : undefined } : undefined}>
                   <div className="small" style={{ color: negative ? "#f87171" : "#34d399", fontWeight: 700 }}>
                     {formatCurrency(value)}
                   </div>
                   <div className={`chart-bar ${negative ? "negative" : "positive"}`} style={{ height: `${Math.max(6, ratio * 110)}px` }}>
                     {negative ? <span className="chart-point-negative" /> : null}
                   </div>
-                  <div className="small muted">{months[index]}</div>
+                  <div className="small muted">{allMonths[index]}</div>
                 </div>
               );
             })}
@@ -715,39 +733,46 @@ function App() {
                 <tr>
                   <th>項目</th>
                   <th>種別</th>
-                  {months.map((month) => (
-                    <th key={month}>{month}</th>
+                  {allMonths.map((month, index) => (
+                    <th key={month} style={index >= 12 ? { color: "#94a3b8", fontStyle: "italic", borderLeft: index === 12 ? "2px solid #475569" : undefined } : undefined}>{month}</th>
                   ))}
                   <th>年計</th>
+                  {derivedMarginMonths > 0 && <th>延長計</th>}
                   <th />
                 </tr>
               </thead>
               <tbody>
-                {cfAutoIncome.perProject.map((project) => (
-                  <tr key={project.id}>
-                    <td>
-                      <div className="inline-stack">
-                        <span>🔗 {project.name}</span>
-                        <Badge color={SITE_OPTIONS[project.paymentSite]?.color || "#94a3b8"}>
-                          {SITE_OPTIONS[project.paymentSite]?.short || `${project.paymentSite}ヶ月`}
-                        </Badge>
-                      </div>
-                    </td>
-                    <td><Badge color="#a78bfa">自動</Badge></td>
-                    {project.shiftedMonthly.map((value, index) => (
-                      <td key={`${project.id}-${index}`} style={{ color: value ? "#c4b5fd" : "#475569" }}>{formatCurrency(value)}</td>
-                    ))}
-                    <td style={{ fontWeight: 700, color: "#c4b5fd" }}>{formatCurrency(project.shiftedMonthly.reduce((sum, value) => sum + value, 0))}</td>
-                    <td />
-                  </tr>
-                ))}
+                {cfAutoIncome.perProject.map((project) => {
+                  const fiscalTotal = project.shiftedMonthly.slice(0, 12).reduce((sum, value) => sum + value, 0);
+                  const marginTotal = project.shiftedMonthly.slice(12).reduce((sum, value) => sum + value, 0);
+                  return (
+                    <tr key={project.id}>
+                      <td>
+                        <div className="inline-stack">
+                          <span>🔗 {project.name}</span>
+                          <Badge color={SITE_OPTIONS[project.paymentSite]?.color || "#94a3b8"}>
+                            {SITE_OPTIONS[project.paymentSite]?.short || `${project.paymentSite}ヶ月`}
+                          </Badge>
+                        </div>
+                      </td>
+                      <td><Badge color="#a78bfa">自動</Badge></td>
+                      {project.shiftedMonthly.map((value, index) => (
+                        <td key={`${project.id}-${index}`} style={{ color: value ? (index >= 12 ? "#a78bfa" : "#c4b5fd") : "#475569", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>{formatCurrency(value)}</td>
+                      ))}
+                      <td style={{ fontWeight: 700, color: "#c4b5fd" }}>{formatCurrency(fiscalTotal)}</td>
+                      {derivedMarginMonths > 0 && <td style={{ fontWeight: 700, color: "#a78bfa" }}>{formatCurrency(marginTotal)}</td>}
+                      <td />
+                    </tr>
+                  );
+                })}
                 <tr className="sum-row">
                   <td>自動入金 小計</td>
                   <td />
                   {cfAutoIncome.totals.map((value, index) => (
-                    <td key={`auto-total-${index}`} style={{ color: "#a78bfa" }}>{formatCurrency(value)}</td>
+                    <td key={`auto-total-${index}`} style={{ color: "#a78bfa", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#a78bfa" }}>{formatCurrency(cfAutoIncome.totals.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#a78bfa" }}>{formatCurrency(cfAutoIncome.totals.slice(0, 12).reduce((sum, value) => sum + value, 0))}</td>
+                  {derivedMarginMonths > 0 && <td style={{ color: "#a78bfa" }}>{formatCurrency(cfAutoIncome.totals.slice(12).reduce((sum, value) => sum + value, 0))}</td>}
                   <td />
                 </tr>
                 {bankManualIncomeRows.map((row) => (
@@ -768,7 +793,11 @@ function App() {
                         <EditableCell value={value} onChange={(next) => updateManualIncomeCell(row.id, index, next)} />
                       </td>
                     ))}
+                    {Array.from({ length: derivedMarginMonths }, (_, i) => (
+                      <td key={`${row.id}-margin-${i}`} style={{ color: "#475569", borderLeft: i === 0 ? "2px solid #475569" : undefined }}>—</td>
+                    ))}
                     <td style={{ fontWeight: 700 }}>{formatCurrency(row.monthly.reduce((sum, value) => sum + value, 0))}</td>
+                    {derivedMarginMonths > 0 && <td style={{ color: "#475569" }}>—</td>}
                     <td>
                       <button type="button" className="danger-button" onClick={() => removeManualIncomeRow(row.id)}>削除</button>
                     </td>
@@ -778,9 +807,10 @@ function App() {
                   <td>入金合計</td>
                   <td />
                   {bankComputed.income.map((value, index) => (
-                    <td key={`income-total-${index}`} style={{ color: "#34d399" }}>{formatCurrency(value)}</td>
+                    <td key={`income-total-${index}`} style={{ color: "#34d399", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#34d399" }}>{formatCurrency(bankComputed.income.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#34d399" }}>{formatCurrency(bankComputed.income.slice(0, 12).reduce((sum, value) => sum + value, 0))}</td>
+                  {derivedMarginMonths > 0 && <td style={{ color: "#34d399" }}>{formatCurrency(bankComputed.income.slice(12).reduce((sum, value) => sum + value, 0))}</td>}
                   <td />
                 </tr>
               </tbody>
@@ -867,30 +897,30 @@ function App() {
                   <td>支払予定合計</td>
                   <td />
                   <td />
-                  {bankComputed.plannedExpense.map((value, index) => (
+                  {bankComputed.plannedExpense.slice(0, 12).map((value, index) => (
                     <td key={`planned-total-${index}`} style={{ color: "#fbbf24" }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#fbbf24" }}>{formatCurrency(bankComputed.plannedExpense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#fbbf24" }}>{formatCurrency(bankComputed.plannedExpense.slice(0, 12).reduce((sum, value) => sum + value, 0))}</td>
                   <td />
                 </tr>
                 <tr className="sum-row">
                   <td>実績出金合計</td>
                   <td />
                   <td />
-                  {bankComputed.actualExpense.map((value, index) => (
+                  {bankComputed.actualExpense.slice(0, 12).map((value, index) => (
                     <td key={`actual-total-${index}`} style={{ color: "#60a5fa" }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#60a5fa" }}>{formatCurrency(bankComputed.actualExpense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#60a5fa" }}>{formatCurrency(bankComputed.actualExpense.slice(0, 12).reduce((sum, value) => sum + value, 0))}</td>
                   <td />
                 </tr>
                 <tr className="sum-row">
                   <td>残高反映出金</td>
                   <td />
                   <td />
-                  {bankComputed.resolvedExpense.map((value, index) => (
+                  {bankComputed.resolvedExpense.slice(0, 12).map((value, index) => (
                     <td key={`resolved-total-${index}`} style={{ color: "#f87171" }}>{formatCurrency(value)}</td>
                   ))}
-                  <td style={{ color: "#f87171" }}>{formatCurrency(bankComputed.resolvedExpense.reduce((sum, value) => sum + value, 0))}</td>
+                  <td style={{ color: "#f87171" }}>{formatCurrency(bankComputed.resolvedExpense.slice(0, 12).reduce((sum, value) => sum + value, 0))}</td>
                   <td />
                 </tr>
               </tbody>
@@ -902,6 +932,7 @@ function App() {
           <div className="card-title">
             <div>
               <h3>収支・残高サマリー</h3>
+              {derivedMarginMonths > 0 && <div className="card-subtitle">延長月（イタリック表示）は入金サイトによる翌期入金を反映しています。</div>}
             </div>
           </div>
           <div className="table-wrap">
@@ -909,8 +940,8 @@ function App() {
               <thead>
                 <tr>
                   <th>項目</th>
-                  {months.map((month) => (
-                    <th key={month}>{month}</th>
+                  {allMonths.map((month, index) => (
+                    <th key={month} style={index >= 12 ? { color: "#94a3b8", fontStyle: "italic", borderLeft: index === 12 ? "2px solid #475569" : undefined } : undefined}>{month}</th>
                   ))}
                 </tr>
               </thead>
@@ -922,7 +953,7 @@ function App() {
                   <tr key={row.label} className="sum-row">
                     <td style={{ color: row.color }}>{row.label}</td>
                     {row.data.map((value, index) => (
-                      <td key={`${row.label}-${index}`} style={{ color: value < 0 ? "#f87171" : row.color }}>
+                      <td key={`${row.label}-${index}`} style={{ color: value < 0 ? "#f87171" : row.color, borderLeft: index === 12 ? "2px solid #475569" : undefined, fontStyle: index >= 12 ? "italic" : undefined }}>
                         {formatCurrency(value)}
                       </td>
                     ))}
@@ -1379,8 +1410,8 @@ function App() {
               const option = SITE_OPTIONS[project.paymentSite] || SITE_OPTIONS[1];
               const shifted = cfAutoIncome.perProject.find((item) => item.id === project.id);
               const yearTotal = project.monthly.reduce((sum, value) => sum + value, 0);
-              const inYearCash = shifted ? shifted.shiftedMonthly.reduce((sum, value) => sum + value, 0) : 0;
-              const lost = yearTotal - inYearCash;
+              const inYearCash = shifted ? shifted.shiftedMonthly.slice(0, 12).reduce((sum, value) => sum + value, 0) : 0;
+              const marginCash = shifted ? shifted.shiftedMonthly.slice(12).reduce((sum, value) => sum + value, 0) : 0;
 
               return (
                 <div key={project.id} className="timeline-card">
@@ -1391,15 +1422,17 @@ function App() {
                   <div className="storage-meta">
                     <div><strong>売上:</strong> {formatCurrency(yearTotal)}</div>
                     <div><strong>今期入金:</strong> {formatCurrency(inYearCash)}</div>
-                    {lost > 0 ? <div><strong>翌期繰越:</strong> {formatCurrency(lost)}</div> : null}
+                    {marginCash > 0 ? <div><strong>翌期入金:</strong> {formatCurrency(marginCash)}</div> : null}
                   </div>
                   <div className="timeline-bars">
-                    {project.monthly.map((value, index) => {
-                      const hasRevenue = value > 0;
-                      const hasCash = shifted?.shiftedMonthly[index] > 0;
+                    {shifted?.shiftedMonthly.map((cashValue, index) => {
+                      const revenueValue = index < 12 ? (ensureMonthlyArray(project.monthly)[index] || 0) : 0;
+                      const hasRevenue = revenueValue > 0;
+                      const hasCash = cashValue > 0;
+                      const isMargin = index >= 12;
                       return (
-                        <Tooltip key={`${project.id}-${index}`} text={`${months[index]} 売上 ${formatCurrency(value)} / 入金 ${formatCurrency(shifted?.shiftedMonthly[index] || 0)}`}>
-                          <span className={`timeline-tick ${hasRevenue ? "income" : ""} ${hasCash ? "active" : ""}`} />
+                        <Tooltip key={`${project.id}-${index}`} text={`${allMonths[index]} ${isMargin ? "" : `売上 ${formatCurrency(revenueValue)} / `}入金 ${formatCurrency(cashValue)}`}>
+                          <span className={`timeline-tick ${hasRevenue ? "income" : ""} ${hasCash ? "active" : ""}`} style={isMargin ? { opacity: 0.6, borderLeft: index === 12 ? "1px dashed #475569" : undefined } : undefined} />
                         </Tooltip>
                       );
                     })}
@@ -1421,8 +1454,8 @@ function App() {
               <thead>
                 <tr>
                   <th>指標</th>
-                  {months.map((month) => (
-                    <th key={month}>{month}</th>
+                  {allMonths.map((month, index) => (
+                    <th key={month} style={index >= 12 ? { color: "#94a3b8", fontStyle: "italic", borderLeft: index === 12 ? "2px solid #475569" : undefined } : undefined}>{month}</th>
                   ))}
                   <th>年計</th>
                 </tr>
@@ -1430,18 +1463,18 @@ function App() {
               <tbody>
                 <tr>
                   <td style={{ color: "#34d399" }}>PL売上高</td>
-                  {projectRevenue.map((value, index) => <td key={`pl-${index}`} style={{ color: "#34d399" }}>{formatCurrency(value)}</td>)}
+                  {gapAnalysis.map((row, index) => <td key={`pl-${index}`} style={{ color: "#34d399", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>{formatCurrency(row.plRevenue)}</td>)}
                   <td style={{ color: "#34d399", fontWeight: 700 }}>{formatCurrency(projectRevenue.reduce((sum, value) => sum + value, 0))}</td>
                 </tr>
                 <tr>
                   <td style={{ color: "#a78bfa" }}>入金(CF)</td>
-                  {cfAutoIncome.totals.map((value, index) => <td key={`cf-${index}`} style={{ color: "#a78bfa" }}>{formatCurrency(value)}</td>)}
+                  {gapAnalysis.map((row, index) => <td key={`cf-${index}`} style={{ color: "#a78bfa", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>{formatCurrency(row.cfIncome)}</td>)}
                   <td style={{ color: "#a78bfa", fontWeight: 700 }}>{formatCurrency(cfAutoIncome.totals.reduce((sum, value) => sum + value, 0))}</td>
                 </tr>
                 <tr className="sum-row">
                   <td style={{ color: "#fbbf24" }}>ギャップ (PL - CF)</td>
-                  {gapAnalysis.map((row) => (
-                    <td key={`gap-${row.month}`} style={{ color: row.gap > 0 ? "#f87171" : row.gap < 0 ? "#34d399" : "#94a3b8" }}>
+                  {gapAnalysis.map((row, index) => (
+                    <td key={`gap-${row.month}`} style={{ color: row.gap > 0 ? "#f87171" : row.gap < 0 ? "#34d399" : "#94a3b8", borderLeft: index === 12 ? "2px solid #475569" : undefined }}>
                       {row.gap > 0 ? `▲${formatCurrency(row.gap)}` : row.gap < 0 ? `▼${formatCurrency(Math.abs(row.gap))}` : "-"}
                     </td>
                   ))}
@@ -1455,10 +1488,11 @@ function App() {
             {gapAnalysis.map((row, index) => {
               const ratio = maxGap ? Math.abs(row.gap) / maxGap : 0;
               const tone = row.gap > 0 ? "negative" : row.gap < 0 ? "positive" : "chart-bar-neutral";
+              const isMargin = index >= 12;
               return (
-                <div key={`gap-bar-${index}`} className="chart-col">
+                <div key={`gap-bar-${index}`} className="chart-col" style={isMargin ? { opacity: 0.6, borderLeft: index === 12 ? "1px dashed #475569" : undefined } : undefined}>
                   <div className={`chart-bar ${tone}`} style={{ height: `${Math.max(6, ratio * 56)}px`, width: "80%" }} />
-                  <div className="small muted">{months[index]}</div>
+                  <div className="small muted">{allMonths[index]}</div>
                 </div>
               );
             })}
@@ -1494,6 +1528,7 @@ function App() {
             { key: "receivableDays", label: "売掛回収日数", unit: "日", desc: "BS の売掛金概算に利用" },
             { key: "payableDays", label: "買掛支払日数", unit: "日", desc: "BS の買掛金概算に利用" },
             { key: "fiscalYearStart", label: "決算期首月", unit: "月", desc: "全タブの月順を年度ベースで切替" },
+            { key: "marginMonths", label: "延長表示月数", unit: "ヶ月 (0-6)", desc: "入金サイトによる年度跨ぎを可視化する追加月数" },
           ].map((field) => (
             <div key={field.key} className="setting-card">
               <h4>{field.label}</h4>
@@ -1504,7 +1539,10 @@ function App() {
                   type="number"
                   value={params[field.key]}
                   onChange={(event) => {
-                    if (field.key === "fiscalYearStart") {
+                    if (field.key === "marginMonths") {
+                      const value = Math.max(0, Math.min(6, Math.round(Number(event.target.value) || 0)));
+                      setParams((current) => ({ ...current, marginMonths: value }));
+                    } else if (field.key === "fiscalYearStart") {
                       const newStart = normalizeStartMonth(event.target.value);
                       const oldStart = params.fiscalYearStart;
                       if (oldStart === newStart) return;
@@ -1541,6 +1579,7 @@ function App() {
           <div><strong>税率</strong> → 法人税等</div>
           <div><strong>売掛 / 買掛日数</strong> → BS 概算</div>
           <div><strong>決算期首月</strong> → すべての月表示順</div>
+          <div><strong>延長表示月数</strong> → 銀行・入金サイト分析タブの翌期入金可視化</div>
         </div>
       </div>
     </>

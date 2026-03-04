@@ -155,7 +155,7 @@ function allZero(monthly) {
 
 /* ── PL row parsing ────────────────────────────────────── */
 
-const STOP_LABELS = new Set(["経常損益金額", "特別利益", "特別損失", "税引前当期純損益金額"]);
+const STOP_LABELS = new Set(["税引前当期純損益金額", "当期純損益金額"]);
 
 // Section heading patterns (label → section transition)
 const SECTION_HEADINGS = [
@@ -164,6 +164,8 @@ const SECTION_HEADINGS = [
   { pattern: /^販売管理費$/, section: "sga", subtype: "expense" },
   { pattern: /^営業外収益$/, section: "other", subtype: "income" },
   { pattern: /^営業外費用$/, section: "other", subtype: "expense" },
+  { pattern: /^特別利益$/, section: "other", subtype: "income" },
+  { pattern: /^特別損失$/, section: "other", subtype: "expense" },
 ];
 
 export function parsePLRows(csvRows, unitMultiplier) {
@@ -172,6 +174,8 @@ export function parsePLRows(csvRows, unitMultiplier) {
   let currentSection = null;
   let currentSubtype = null;
   let skippedCount = 0;
+  // Track tentatively-added heading row index for double-count prevention
+  let sectionHeadingIdx = -1;
 
   // Data rows start at index 2 (row 0 = title, row 1 = header)
   // Monthly values are in columns 6-17, column 18 = period total
@@ -182,22 +186,24 @@ export function parsePLRows(csvRows, unitMultiplier) {
     const label = getLabel(row);
     if (!label) continue;
 
-    // Stop parsing at 経常損益 and beyond
+    // Stop parsing at tax / net income lines
     if (STOP_LABELS.has(label)) break;
 
     // Check for section heading
     const heading = SECTION_HEADINGS.find((h) => h.pattern.test(label));
     if (heading) {
-      // Check if this is a heading-only row (all data columns empty or zero)
       const monthlyVals = [];
       for (let c = 6; c < 6 + MONTH_COUNT && c < row.length; c++) {
         monthlyVals.push(parseNum(row[c], unitMultiplier));
       }
       currentSection = heading.section;
       currentSubtype = heading.subtype;
+      sectionHeadingIdx = -1;
 
-      // If this heading row has actual data (e.g. 売上高 with values), include it
+      // If this heading row has actual data, tentatively include it.
+      // It will be removed if detail rows follow (to prevent double-counting).
       if (!allZero(monthlyVals) && !shouldSkipRow(label)) {
+        sectionHeadingIdx = plRows.length;
         plRows.push({
           id: uid(),
           section: currentSection,
@@ -229,6 +235,16 @@ export function parsePLRows(csvRows, unitMultiplier) {
     if (allZero(monthly)) {
       skippedCount++;
       continue;
+    }
+
+    // First detail row in this section: remove the tentatively-added heading
+    // to prevent heading total + detail rows double-counting
+    if (sectionHeadingIdx >= 0) {
+      const removed = plRows.splice(sectionHeadingIdx, 1);
+      sectionHeadingIdx = -1;
+      if (removed.length > 0) {
+        warnings.push(`「${removed[0].label}」は内訳行があるため見出し合計をスキップしました`);
+      }
     }
 
     plRows.push({
@@ -281,6 +297,9 @@ export function parseBSData(csvRows, unitMultiplier) {
   let receivableOpening = 0;
   let payableOpening = 0;
 
+  // First pass: collect all bank candidates with their hierarchy levels
+  const bankCandidates = [];
+
   // BS header: columns 0-5 = hierarchy, column 6 = 期首, columns 7-18 = monthly
   for (let r = 2; r < csvRows.length; r++) {
     const row = csvRows[r];
@@ -290,21 +309,30 @@ export function parseBSData(csvRows, unitMultiplier) {
     if (!label) continue;
 
     const openingVal = parseNum(row[6], unitMultiplier); // 期首 column
+    const level = getLevel(row);
 
-    // Detect bank accounts
     if (isBankRow(label)) {
-      bankAccounts.push({ label, opening: openingVal });
-      startingCash += openingVal;
+      bankCandidates.push({ label, opening: openingVal, level });
     }
 
-    // Detect 売掛金
     if (label === "売掛金") {
       receivableOpening = openingVal;
     }
 
-    // Detect 買掛金
     if (label === "買掛金") {
       payableOpening = openingVal;
+    }
+  }
+
+  // Second pass: exclude parent rows (those followed by a deeper-level bank row)
+  // to prevent double-counting of summary + detail rows
+  for (let i = 0; i < bankCandidates.length; i++) {
+    const current = bankCandidates[i];
+    const hasChild = i + 1 < bankCandidates.length &&
+      bankCandidates[i + 1].level > current.level;
+    if (!hasChild) {
+      bankAccounts.push({ label: current.label, opening: current.opening });
+      startingCash += current.opening;
     }
   }
 
