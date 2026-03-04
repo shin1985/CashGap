@@ -104,7 +104,12 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
   const ordinaryProfit = operatingProfit.map(
     (value, index) => value + otherIncome[index] - otherExpense[index],
   );
-  const taxAmount = ordinaryProfit.map((value) => Math.max(0, value * (Number(params.taxRate) || 0) / 100));
+  // Tax is calculated on annual ordinary profit (not per-month).
+  // This prevents over-taxation when monthly profits and losses offset each other.
+  const totalOrdinaryProfit = ordinaryProfit.reduce((sum, value) => sum + value, 0);
+  const annualTax = Math.max(0, totalOrdinaryProfit * (Number(params.taxRate) || 0) / 100);
+  const monthlyTaxAllocation = annualTax / MONTH_COUNT;
+  const taxAmount = new Array(MONTH_COUNT).fill(monthlyTaxAllocation);
   const netIncome = ordinaryProfit.map((value, index) => value - taxAmount[index]);
 
   const cash = balance.at(-1) ?? Number(params.startingCash) ?? 0;

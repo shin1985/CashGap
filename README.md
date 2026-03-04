@@ -69,7 +69,7 @@ npm run dev
 4. **データ入力** — Projects / Bank / PL タブでデータを入力。リアルタイムで集計が更新される
 5. **保存** — 保存ボタンで Google Sheets に書き込み
 
-freee の CSV をインポートする場合は、Settings タブから損益計算書・貸借対照表の CSV を読み込めます。
+freee の CSV をインポートする場合は、Google Drive タブ（Storage）から損益計算書・貸借対照表の CSV を読み込めます。
 
 ## データ構造
 
