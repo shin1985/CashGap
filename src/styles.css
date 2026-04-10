@@ -315,6 +315,7 @@ button {
 
 .table-wrap {
   overflow: auto;
+  max-height: 70vh;
   border: 1px solid rgba(100, 116, 139, 0.12);
   border-radius: 16px;
 }
@@ -334,7 +335,7 @@ button {
 .data-table thead th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 2;
   padding: 10px 8px;
   background: #0d1728;
   color: #94a3b8;
@@ -346,7 +347,11 @@ button {
 }
 
 .data-table thead th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 3;
   text-align: left;
+  background: #0d1728;
 }
 
 .data-table tbody td {
@@ -355,9 +360,13 @@ button {
 }
 
 .data-table tbody td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
   padding: 6px 10px;
   min-width: 150px;
   text-align: left;
+  background: rgba(11, 18, 32, 0.97);
 }
 
 .data-table tbody tr:hover {
@@ -369,6 +378,10 @@ button {
   font-weight: 700;
 }
 
+.sum-row td:first-child {
+  background: rgba(15, 23, 42, 0.97);
+}
+
 .section-row td {
   padding: 10px 10px 6px !important;
   font-size: 12px;
@@ -376,6 +389,32 @@ button {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   background: rgba(10, 15, 28, 0.8);
+}
+
+.data-table th:first-child,
+.data-table td:first-child {
+  border-right: 1px solid rgba(100, 116, 139, 0.18);
+}
+
+/* Freeze multiple leading columns (used by project table) */
+.data-table th.sticky-col,
+.data-table td.sticky-col {
+  position: sticky;
+  z-index: 1;
+  background: rgba(11, 18, 32, 0.97);
+}
+
+.data-table thead th.sticky-col {
+  z-index: 3;
+  background: #0d1728;
+}
+
+.sum-row td.sticky-col {
+  background: rgba(15, 23, 42, 0.97);
+}
+
+.data-table .sticky-col-last {
+  border-right: 1px solid rgba(100, 116, 139, 0.18);
 }
 
 .cell-button,
@@ -405,6 +444,11 @@ button {
   border: 1px solid rgba(96, 165, 250, 0.34);
   background: #0b1526;
   color: #f8fafc;
+  font-size: 13px;
+}
+
+.select-field {
+  min-width: 90px;
 }
 
 .settings-grid {

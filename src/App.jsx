@@ -20,6 +20,8 @@ import {
 } from "./lib/googleApis";
 import { initializeWorkbook, loadWorkbook, saveWorkbook } from "./lib/sheetStore";
 import { parseFreeeFile } from "./lib/freeeParser";
+import { parseBankCsvFiles, previewBankCsv } from "./lib/bankCsvParser";
+import { exportPdf, exportCsv } from "./lib/reportExport";
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY || "";
@@ -111,6 +113,8 @@ function App() {
   const [freeeImport, setFreeeImport] = useState({ plFile: null, bsFile: null });
   const plFileRef = useRef(null);
   const bsFileRef = useRef(null);
+  const [bankCsvImport, setBankCsvImport] = useState({ files: [], texts: [], preview: null, fiscalStart: null });
+  const bankCsvFileRef = useRef(null);
   const lastSavedDigestRef = useRef(JSON.stringify(defaultState));
 
   const persistableState = useMemo(
@@ -487,6 +491,81 @@ function App() {
     if (bsFileRef.current) bsFileRef.current.value = "";
   };
 
+  /* ── Bank CSV import handlers ──────────────────── */
+
+  const handleBankCsvFileSelect = (fileList) => {
+    if (!fileList || fileList.length === 0) return;
+    const files = Array.from(fileList);
+    let loaded = 0;
+    const texts = new Array(files.length);
+    files.forEach((file, idx) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        texts[idx] = reader.result;
+        loaded++;
+        if (loaded === files.length) {
+          try {
+            const fiscalStart = params.fiscalYearStart;
+            const preview = previewBankCsv(texts, fiscalStart);
+            setBankCsvImport({ files, texts, preview, fiscalStart });
+          } catch (err) {
+            setBankCsvImport({ files: [], texts: [], preview: null, fiscalStart: null });
+            setNotice({ tone: "warning", text: `銀行CSV パースエラー: ${err.message}` });
+          }
+        }
+      };
+      reader.readAsText(file, "utf-8");
+    });
+  };
+
+  const handleBankCsvImport = () => {
+    const { texts, fiscalStart } = bankCsvImport;
+    if (!texts.length) return;
+    try {
+      const { expenseRows, incomeRows } = parseBankCsvFiles(texts, fiscalStart);
+      if (expenseRows.length > 0) {
+        setBankExpenseRows((prev) => [...prev, ...expenseRows]);
+      }
+      if (incomeRows.length > 0) {
+        setBankManualIncomeRows((prev) => [...prev, ...incomeRows]);
+      }
+      setNotice({
+        tone: "success",
+        text: `銀行CSVインポート完了 — 出金 ${expenseRows.length} 科目、入金 ${incomeRows.length} 科目を追加しました`,
+      });
+      handleBankCsvClear();
+    } catch (err) {
+      setNotice({ tone: "warning", text: `銀行CSVインポートエラー: ${err.message}` });
+    }
+  };
+
+  const handleBankCsvClear = () => {
+    setBankCsvImport({ files: [], texts: [], preview: null, fiscalStart: null });
+    if (bankCsvFileRef.current) bankCsvFileRef.current.value = "";
+  };
+
+  /* ── Report export handler ─────────────────────── */
+
+  const handleExportReport = (format) => {
+    const payload = {
+      months,
+      allMonths,
+      params,
+      plRows,
+      plComputed,
+      bsComputed,
+      bankComputed,
+      projects,
+      projectRevenue,
+      cfAutoIncome,
+    };
+    if (format === "pdf") {
+      exportPdf(payload);
+    } else {
+      exportCsv(payload);
+    }
+  };
+
   const renderStorage = () => (
     <>
       {!HAS_GOOGLE_CONFIG ? (
@@ -685,7 +764,7 @@ function App() {
 
         <div className="grid-four">
           <MetricCard label="期首残高" value={formatCurrency(params.startingCash)} color="#cbd5e1" />
-          <MetricCard label="期末残高" value={formatCurrency(bankComputed.balance.at(-1) ?? params.startingCash)} color={(bankComputed.balance.at(-1) ?? 0) >= 0 ? "#34d399" : "#f87171"} />
+          <MetricCard label="期末残高" value={formatCurrency(bankComputed.balance[11] ?? params.startingCash)} color={(bankComputed.balance[11] ?? 0) >= 0 ? "#34d399" : "#f87171"} />
           <MetricCard label="年間入金合計" value={formatCurrency(bankComputed.income.reduce((sum, value) => sum + value, 0))} color="#67e8f9" sub={`自動連動 ${formatCurrency(cfAutoIncome.totals.reduce((sum, value) => sum + value, 0))}`} />
           <MetricCard label="年間出金(残高反映)" value={formatCurrency(bankComputed.resolvedExpense.reduce((sum, value) => sum + value, 0))} color="#f87171" sub={`予定 ${formatCurrency(bankComputed.plannedExpense.reduce((sum, value) => sum + value, 0))} / 実績 ${formatCurrency(bankComputed.actualExpense.reduce((sum, value) => sum + value, 0))}`} />
         </div>
@@ -714,6 +793,64 @@ function App() {
                 </div>
               );
             })}
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="card-title">
+            <div>
+              <h3>銀行CSV インポート</h3>
+              <div className="card-subtitle">銀行の入出金明細CSVから科目ごとに出金・入金データを一括取り込みます。</div>
+            </div>
+            {bankCsvImport.preview && (
+              <button type="button" className="ghost-button" onClick={handleBankCsvClear}>クリア</button>
+            )}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <input
+              ref={bankCsvFileRef}
+              type="file"
+              multiple
+              accept=".csv"
+              className="freee-file-input"
+              onChange={(e) => handleBankCsvFileSelect(e.target.files)}
+            />
+            {bankCsvImport.preview && (
+              <>
+                <div className="freee-file-meta">
+                  <div><strong>ファイル数:</strong> {bankCsvImport.files.length} 件</div>
+                  <div><strong>出金科目:</strong> {bankCsvImport.preview.expenseRowCount} 科目 — 合計 ¥{bankCsvImport.preview.monthlyTotals.expense.reduce((s, v) => s + v, 0).toLocaleString()}</div>
+                  <div><strong>入金科目:</strong> {bankCsvImport.preview.incomeRowCount} 科目 — 合計 ¥{bankCsvImport.preview.monthlyTotals.income.reduce((s, v) => s + v, 0).toLocaleString()}</div>
+                </div>
+                <details>
+                  <summary className="small" style={{ cursor: "pointer", color: "#94a3b8" }}>科目一覧を表示</summary>
+                  <div className="table-wrap" style={{ marginTop: 8 }}>
+                    <table className="data-table">
+                      <thead>
+                        <tr><th>科目</th><th>出金合計</th><th>入金合計</th></tr>
+                      </thead>
+                      <tbody>
+                        {bankCsvImport.preview.categories.map((cat) => (
+                          <tr key={cat.name}>
+                            <td>{cat.name}</td>
+                            <td style={{ textAlign: "right" }}>{cat.expenseTotal ? `¥${cat.expenseTotal.toLocaleString()}` : "—"}</td>
+                            <td style={{ textAlign: "right" }}>{cat.incomeTotal ? `¥${cat.incomeTotal.toLocaleString()}` : "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+                <div className="action-row">
+                  <button type="button" className="primary-button" onClick={handleBankCsvImport}>
+                    インポート実行
+                  </button>
+                  <span className="small muted" style={{ alignSelf: "center" }}>
+                    既存行はクリアされず、新しい行として追加されます
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
@@ -1278,10 +1415,10 @@ function App() {
             <table className="data-table">
               <thead>
                 <tr>
-                  <th>プロジェクト名</th>
-                  <th>クライアント</th>
-                  <th>状態</th>
-                  <th>
+                  <th className="sticky-col" style={{ left: 0 }}>プロジェクト名</th>
+                  <th className="sticky-col" style={{ left: 150 }}>クライアント</th>
+                  <th className="sticky-col" style={{ left: 270 }}>状態</th>
+                  <th className="sticky-col sticky-col-last" style={{ left: 370 }}>
                     <Tooltip text="売上計上から入金までのラグです。銀行タブの自動入金予測に反映されます。">
                       <span>入金サイト ⓘ</span>
                     </Tooltip>
@@ -1299,7 +1436,7 @@ function App() {
                   const total = project.monthly.reduce((sum, value) => sum + value, 0);
                   return (
                     <tr key={project.id}>
-                      <td>
+                      <td className="sticky-col" style={{ left: 0 }}>
                         <EditableCell
                           type="text"
                           value={project.name}
@@ -1307,7 +1444,7 @@ function App() {
                           align="left"
                         />
                       </td>
-                      <td>
+                      <td className="sticky-col" style={{ left: 150 }}>
                         <EditableCell
                           type="text"
                           value={project.client}
@@ -1315,7 +1452,7 @@ function App() {
                           align="left"
                         />
                       </td>
-                      <td>
+                      <td className="sticky-col" style={{ left: 270 }}>
                         <select
                           className="select-field"
                           value={project.status}
@@ -1329,7 +1466,7 @@ function App() {
                           ))}
                         </select>
                       </td>
-                      <td>
+                      <td className="sticky-col sticky-col-last" style={{ left: 370 }}>
                         <select
                           className="select-field"
                           value={project.paymentSite}
@@ -1639,6 +1776,12 @@ function App() {
               <span className="status-chip" style={{ color: isDirty ? "#fbbf24" : "#34d399" }}>{isDirty ? "未保存" : "保存済み"}</span>
               <button type="button" className="secondary-button" onClick={handleResetSamples} disabled={Boolean(working)}>
                 サンプルに戻す
+              </button>
+              <button type="button" className="secondary-button" onClick={() => handleExportReport("pdf")}>
+                PDF
+              </button>
+              <button type="button" className="secondary-button" onClick={() => handleExportReport("csv")}>
+                CSV
               </button>
               <button type="button" className="primary-button" onClick={handleSaveWorkbook} disabled={!connection.workbook || Boolean(working)}>
                 {working || "保存"}

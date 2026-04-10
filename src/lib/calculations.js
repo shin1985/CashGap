@@ -153,7 +153,7 @@ export function computeFinancials({ params, projects, bankExpenseRows, bankManua
   const taxAmount = new Array(MONTH_COUNT).fill(monthlyTaxAllocation);
   const netIncome = ordinaryProfit.map((value, index) => value - taxAmount[index]);
 
-  const cash = balance.at(-1) ?? Number(params.startingCash) ?? 0;
+  const cash = balance[MONTH_COUNT - 1] ?? Number(params.startingCash) ?? 0;
   const totalRevenue = revenue.reduce((sum, value) => sum + value, 0);
   const receivables = Number(params.receivableOpening) ||
     (totalRevenue / MONTH_COUNT) * ((Number(params.receivableDays) || 0) / 30);
